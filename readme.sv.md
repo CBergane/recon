@@ -1,5 +1,5 @@
 ### `README.sv.md`
-
+gi
 # recon-pipeline
 
 Snabb, robust och repeterbar recon-pipeline för bug bounty / attackytkartläggning.  
