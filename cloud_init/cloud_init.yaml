@@ -8,7 +8,7 @@ users:
     sudo: ALL=(ALL) NOPASSWD:ALL
     lock_passwd: true
     ssh_authorized_keys:
-      - <ssh key here>
+      - <ssh key>
 
 package_update: true
 packages:
@@ -44,7 +44,7 @@ write_files:
       mkdir -p /root/recon
       cd /root/recon
       if [ ! -d live ]; then
-        git clone --depth 1 https://github.com/YOURUSER/YOURREPO.git live
+        git clone --depth 1 https://github.com/CBergane/recon.git live
       fi
 
       cd /root/recon/live
