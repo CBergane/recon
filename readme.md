@@ -1,111 +1,117 @@
+
+---
+
+### `README.md`
+
+
 # recon-pipeline
 
-Snabb, robust och repeterbar recon-pipeline för bug bounty / attackytkartläggning.
-Bygger per-körning-artefakter, tar skärmdumpar, kör frivillig Nuclei och genererar **rapport i både Markdown och HTML**.
+Fast, robust, and repeatable recon pipeline for bug bounty / attack surface mapping.  
+Generates per-run artifacts, takes screenshots, optionally runs Nuclei, and produces **reports in Markdown and HTML**.
 
-## Innehåll
+## Table of Contents
 
-* [Funktioner](#funktioner)
-* [Krav](#krav)
-* [Installation](#installation)
-* [Förberedelser](#förberedelser)
-* [Snabbstart](#snabbstart)
-* [Profiler](#profiler)
-* [Inputfiler](#inputfiler)
-* [Output & rapport](#output--rapport)
-* [Flaggor & miljövariabler](#flaggor--miljövariabler)
-* [Arbetsflöde (rekommenderat)](#arbetsflöde-rekommenderat)
-* [Tips](#tips)
-* [Felsökning](#felsökning)
-* [Juridik](#juridik)
-
----
-
-## Funktioner
-
-* Passiv & aktiv subdomäninsamling (subfinder, amass, assetfinder, puredns, dnsgen/shuffledns)
-* **Wildcard-DNS-detektion** med valfri exkludering av wildcard-IP
-* DNS-upplösning → IP (v4/v6), **ASN/CIDR-allow/deny**, blacklist
-* **Naabu portscan** (inkrementell caching av redan skannade IP)
-* **TLS cert scraping (tlsx)** → fler subdomäner (CN/SAN), auto-merge in-scope
-* httpx fingerprinting (status, titel, tech, server), historik (gau/waybackurls)
-* Katana crawl (valfritt), **gowitness skärmdumpar** (valfritt)
-* **Nuclei** (valfritt, selektiv tags/severity)
-* **Per-körningens outputmapp** `out/YYYYmmdd-HHMMSS/` + symlink `out.latest`
-* **Rapporter**: `report.md` och `report.html` (Pandoc om tillgängligt, annars inbyggd HTML)
+- [Features](#features)
+- [Requirements](#requirements)
+- [Installation](#installation)
+- [Preparation](#preparation)
+- [Quickstart](#quickstart)
+- [Profiles](#profiles)
+- [Input Files](#input-files)
+- [Output & Reports](#output--reports)
+- [Flags & Environment Variables](#flags--environment-variables)
+- [Recommended Workflow](#recommended-workflow)
+- [Tips](#tips)
+- [Troubleshooting](#troubleshooting)
+- [Legal](#legal)
+- [Cheatsheet](#cheatsheet)
 
 ---
 
-## Krav
+## Features
 
-* Debian/Ubuntu-bas: `apt`
-* Go 1.20+ rekommenderas
+- Passive & active subdomain discovery (subfinder, amass, assetfinder, puredns, dnsgen/shuffledns)
+- **Wildcard DNS detection** with optional exclusion of wildcard IPs
+- DNS resolve → IP (v4/v6), **ASN/CIDR allow/deny**, blacklists
+- **Naabu port scan** (incremental: caches already scanned IPs)
+- **TLS cert scraping (tlsx)** → more subdomains (CN/SAN), auto-merge in-scope
+- httpx fingerprinting (status, titles, tech, server), history (gau/waybackurls)
+- Katana crawling (optional), **gowitness screenshots** (optional)
+- **Per-run output directory** `out/YYYYmmdd-HHMMSS/` + symlink `out.latest`
+- **Reports**: `report.md` and `report.html` (Pandoc if available, otherwise a built-in HTML)
+
+---
+
+## Requirements
+
+- Debian/Ubuntu/Kali base with `apt`
+- Go 1.20+ recommended
 
 ## Installation
 
 ```bash
 make install
-```
+````
 
-Detta installerar systempaket (inkl. `libpcap-dev` för naabu) och Go-verktyg:
+This installs system packages (including `libpcap-dev` for naabu) and Go tools:
 subfinder, dnsx, naabu, httpx, shuffledns, asnmap, mapcidr, katana, nuclei,
-gau, waybackurls, gowitness, assetfinder, puredns, samt `pandoc` för HTML-rapport.
+gau, waybackurls, gowitness, assetfinder, puredns, and `pandoc` for HTML report.
 
-> **Tips:** Naabu får raw-sockets via `setcap` om möjligt (körs i `make install`).
+> **Note:** `make install` attempts `setcap` on `naabu` to enable raw sockets without sudo (if available).
 
-## Förberedelser
+## Preparation
 
 ```bash
 make prepare
 ```
 
-Skapar struktur `~/recon/<projekt>/{input,raw,out}` och lägger basfiler i `input/`.
+Creates structure `~/recon/<project>/{input,raw,out}` and seeds the `input/` basics.
 
-## Snabbstart
+## Quickstart
 
 ```bash
-# Standard: "home"-profil
+# Default: "home" profile
 make run
 
-# VPS-profil (aggressivare rate limits)
+# VPS profile (more aggressive rate limits)
 make run PROFILE=vps
 
-# Endast generera rapport från senaste körningen (ingen ny scanning)
+# Only (re)build report from the latest run (no new scanning)
 make report
-make report-open    # öppnar HTML-rapporten (Linux desktop)
+make report-open    # open the HTML report (Linux desktop)
 ```
 
-## Profiler
+## Profiles
 
-`PROFILE=mobile|home|office|vps` styr rate-limits och timeouts:
+`PROFILE=mobile|home|office|vps` tunes rate limits and timeouts:
 
-* **mobile** – försiktigt/minimal påverkan
+* **mobile** – conservative / minimal impact
 * **home** – default
-* **office** – snabbare
-* **vps** – aggressiv (för server/box med bra nät)
+* **office** – faster
+* **vps** – aggressive (for servers with good connectivity)
 
-## Inputfiler
+## Input Files
 
-`input/` (skapas av `make prepare`):
+`input/` (created by `make prepare`):
 
-* `domains.txt` – apex, `*.exempel.com` (normaliseras), `exempel.*` (kräver `tlds.txt`)
-* `tlds.txt` – suffix för att expandera `exempel.*` (stödjer multi-label som `co.uk`)
-* `resolvers.txt` – DNS-resolvers (en per rad)
-* `ips.txt` / `cidrs.txt` – valfria extra mål
-* `asns.txt` – valfri allowlist (ASN, en per rad)
-* `blacklist_ips.txt` / `blacklist_cidrs.txt` – valfri denylist
+* `domains.txt` – apex, `*.example.com` (normalized), or `example.*` (needs `tlds.txt`)
+* `tlds.txt` – suffixes to expand `example.*` (supports multi-label like `co.uk`)
+* `resolvers.txt` – DNS resolvers (one per line)
+* `ips.txt` / `cidrs.txt` – optional extra targets
+* `asns.txt` – optional allowlist (one ASN per line)
+* `blacklist_ips.txt` / `blacklist_cidrs.txt` – optional denylist
 
-## Output & rapport
+## Output & Reports
 
-Varje körning skriver till **egen mapp**:
+Each run writes to its **own directory**:
 
 ```
 out/
-  2025xxxx-XXXXXX/   ← denna körnings artefakter
-  out.latest -> out/2025xxxx-XXXXXX  (symlink till senaste körningen)
+  2025xxxx-XXXXXX/   ← artifacts for that run
+  out.latest -> out/2025xxxx-XXXXXX  (symlink to the latest run)
 ```
 
-Nyckelfiler:
+Key files:
 
 * `subdomains.txt`
 * `resolved.txt`
@@ -113,114 +119,119 @@ Nyckelfiler:
 * `open_ports.json`, `open_ports.txt`, `ip_port_pairs.csv`, `ip_port_hosts.csv`, `ports_by_ip.txt`
 * `services_httpx.json`, `services_httpx.txt`, `urls_httpx.txt`
 * `historical_endpoints.txt`, `katana_endpoints.txt`
-* `subs_from_certs.in_scope.txt` (från **tlsx**)
-* `nuclei_findings.txt` (om kört)
-* `screenshots/` (om gowitness kört)
-* **Rapporter**: `report.md` och `report.html`
+* `subs_from_certs.in_scope.txt` (from **tlsx**)
+* `nuclei_findings.txt` (if run)
+* `screenshots/` (if gowitness ran)
+* **Reports**: `report.md` and `report.html`
 
-> **Snabb rapportsnurr:** `make report` bygger om `report.md/html` från **befintliga** artefakter i `out.latest/`.
+> **Quick reporting:** `make report` rebuilds `report.md/html` from **existing** artifacts in `out.latest/`.
 
-## Flaggor & miljövariabler
+## Flags & Environment Variables
 
-Kör direkt:
+Run directly:
 
 ```bash
 ./recon.sh -p vps --from 1 --to 13
 ```
 
-Eller via `make` (skickar vidare `PROFILE`, m.m.).
+Or via `make` (passes `PROFILE`, etc).
 
-Vanliga variabler:
+Common variables:
 
 * `PROFILE=mobile|home|office|vps`
 * `WORDLIST=/path/to/dns-wordlist.txt`
-* `DRY_RUN=1` – visa plan, kör inget
-* `INCREMENTAL=1` – portscan skannar bara **nya** IP (cache i `out/state/`)
-* `WILDCARD_EXCLUDE=1` – filtrera bort IP som matchar wildcard-DNS
-* `GW_LIMIT=200` – max antal URL\:er för skärmdumpar
-* `REPORT_ONLY=1` – bygg **bara** rapport (ingen scanning)
+* `DRY_RUN=1` – show the plan, run nothing
+* `INCREMENTAL=1` – port scan only **new** IPs (cache in `out/state/`)
+* `WILDCARD_EXCLUDE=1` – filter IPs seen only via wildcard DNS
+* `GW_LIMIT=200` – max URLs for screenshots
+* `REPORT_ONLY=1` – build **only** the report (no scanning)
 
-Stegintervall:
+Step range:
 
-* `--from <N> --to <M>` – kör endast delmängd av kedjan (se “UI / steg” i skriptet)
+* `--from <N> --to <M>` – run a subset of the chain (see “UI / steps” in the script)
 
-Skippa delar:
+Skip parts:
 
 * `SKIP_BRUTE=1`, `SKIP_PORTSCAN=1`, `SKIP_KATANA=1`, `SKIP_NUCLEI=1`
 
-## Arbetsflöde (rekommenderat)
+## Recommended Workflow
 
-1. `make prepare` → lägg in targets i `input/domains.txt`.
-2. `make run PROFILE=vps` (eller `home` lokalt).
-3. Följ loggen i `out/<run>/run.log` eller i terminalen.
-4. När körningen är klar: öppna `out/<run>/report.html` eller `make report-open`.
-5. Prioritera fynd:
+1. `make prepare` → edit `input/domains.txt` with your targets.
 
-   * `nuclei_findings.txt` (high/critical)
-   * `ip_port_hosts.csv` (intressanta portar + hosts)
-   * `services_httpx.txt` (titlar/tech)
+2. `make run PROFILE=vps` (or `home` locally).
+
+3. Watch progress in `out/<run>/run.log` or in your terminal.
+
+4. Once done: open `out/<run>/report.html` or run `make report-open`.
+
+5. Triage focus:
+
+   * `nuclei_findings.txt` (high/critical first)
+   * `ip_port_hosts.csv` (interesting ports + hostnames)
+   * `services_httpx.txt` (titles/tech)
    * `historical_endpoints.txt` + `katana_endpoints.txt`
-   * Screenshots i `screenshots/`
-6. Behöver ny rapport utan ny scanning? → `make report`.
+   * Screenshots in `screenshots/`
+
+6. Need a fresh report without re-scanning? → `make report`.
 
 ## Tips
 
-* **Subfinder API-nycklar**: lägg i `~/.config/subfinder/provider-config.yaml` för bättre träff.
-* **Resolvers**: bra resolvers ger snabbare/stabilare `dnsx`/`puredns`.
-* **ASN allowlist** (`input/asns.txt`): krymp skanningsyta till “rätt” nät.
-* **Blacklist**: exkludera tredjeparts-CDN eller shared hosting med `blacklist_*`.
-* **tlsx**: vi skrapar CN/SAN från 443/8443 för att hitta fler subdomäner – ofta guld!
-* **Nuclei**: Byt taggar/severity efter behov (ex. `-severity high,critical`).
-* **Katana djup**: default depth 3 – höj sällan, det exploderar snabbt i volym.
+* **Subfinder API keys**: put them in `~/.config/subfinder/provider-config.yaml` to improve results.
+* **Resolvers**: better resolvers → faster/stable `dnsx`/`puredns`.
+* **ASN allowlist** (`input/asns.txt`): reduce the scan surface to “your” networks.
+* **Blacklist**: exclude third-party CDNs or shared hosting via `blacklist_*`.
+* **tlsx**: scraping CN/SAN from 443/8443 often finds gold subdomains.
+* **Nuclei**: tune tags/severity to your needs (e.g., `-severity high,critical`).
+* **Katana depth**: default 3—raise with care (volume explodes).
 
-## Felsökning
+## Troubleshooting
 
-**`pcap.h: No such file or directory` vid `go install naabu`**
-→ `sudo apt install -y libpcap-dev pkg-config` och kör `make install` igen.
+**`pcap.h: No such file or directory` during `go install naabu`**
+→ `sudo apt install -y libpcap-dev pkg-config` then `make install` again.
 
-**`naabu` kräver sudo / permission denied**
+**`naabu` requires sudo / permission denied**
 → `sudo setcap cap_net_raw,cap_net_admin+eip "$(command -v naabu)"`.
 
-**`gowitness` funkar inte (headless)**
-→ Se till att `chromium` och `fonts-liberation` är installerade (görs i `make install`).
+**`gowitness` fails (headless)**
+→ Ensure `chromium` and `fonts-liberation` are installed (`make install` handles it).
 
-**`pandoc` saknas / ingen HTML-rapport**
-→ Skriptet har en enkel HTML-fallback. Installera `pandoc` för snyggare HTML.
+**`pandoc` missing / no HTML report**
+→ The script has a simple HTML fallback. Install `pandoc` for nicer HTML.
 
-**Stora mål (tusentals apex)**
-→ Använd `PROFILE=vps`, `--from/--to`, `INCREMENTAL=1`, samt `WILDCARD_EXCLUDE=1`.
-→ Bekräftelsen kan hoppas över med `--yes`.
+**Huge scopes (thousands of apex)**
+→ Use `PROFILE=vps`, `--from/--to`, `INCREMENTAL=1`, and `WILDCARD_EXCLUDE=1`.
+→ Skip confirmation with `--yes`.
 
-**DNS timeouts/long runs**
-→ Byt/trimma `resolvers.txt`, eller sänk profil (ex. `home`).
+**DNS timeouts / long runs**
+→ Adjust `resolvers.txt`, or pick a lower profile (e.g., `home`).
 
-## Juridik
+## Legal
 
-Kör endast mot **tillåtna** mål inom programmens scope. Du ansvarar själv för all användning.
+Only run against **authorized** targets within program scope. You are responsible for all usage.
 
 ---
 
-### Snabbkommandon (cheatsheet)
+## Cheatsheet
 
 ```bash
-# Full körning (home)
+# Full run (home)
 make run
 
-# Aggressivt (VPS), kör hela kedjan
+# Aggressive (VPS), full chain
 make run PROFILE=vps
 
-# Bara rapport från senaste körningen
+# Report-only from latest run
 make report
 make report-open
 
-# Endast steg 1–6 (t.ex. fram till portscan)
+# Only steps 1–6 (e.g., through port scan)
 PROFILE=home ./recon.sh --from 1 --to 6
 
-# Skippa tunga steg & kör snabbt
+# Quick pass: skip heavy steps
 SKIP_BRUTE=1 SKIP_PORTSCAN=1 ./recon.sh -p home
 
-# Inkrementell portscan + wildcard-filter
+# Incremental port scan + wildcard filtering
 INCREMENTAL=1 WILDCARD_EXCLUDE=1 make run PROFILE=vps
 ```
 
-Klar! Om du vill kan jag även lägga till en liten **sample-rapport** att checka in i repo\:t som referens.
+---

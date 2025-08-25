@@ -8,7 +8,7 @@ users:
     sudo: ALL=(ALL) NOPASSWD:ALL
     lock_passwd: true
     ssh_authorized_keys:
-      - ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBHB/UxkPTvkb5h/05rZWAUg4F0yUPpufmcmMQGS+zfO christian@kal-el
+      - <ssh key here>
 
 package_update: true
 packages:

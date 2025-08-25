@@ -11,3 +11,5 @@ input/cidrs.txt
 # editor/os
 .DS_Store
 *.swp
+
+ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBHB/UxkPTvkb5h/05rZWAUg4F0yUPpufmcmMQGS+zfO christian@kal-el
