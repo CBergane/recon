@@ -1,0 +1,2 @@
+badssl.com
+scanme.nmap.org

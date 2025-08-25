@@ -1,0 +1,99 @@
+#cloud-config
+ssh_pwauth: false          # stäng lösenords-SSH
+users:
+  # OBS: Om din avbild använder användaren "kali" som standard,
+  # byter du 'name: root' mot 'name: kali' och låter resten vara lika.
+  - name: root
+    shell: /bin/bash
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    lock_passwd: true
+    ssh_authorized_keys:
+      - ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBHB/UxkPTvkb5h/05rZWAUg4F0yUPpufmcmMQGS+zfO christian@kal-el
+
+package_update: true
+packages:
+  - git
+  - make
+  - tmux
+  - jq
+  - ripgrep
+  - moreutils
+  - chromium
+  - fonts-liberation
+  - pandoc
+  - golang-go
+  - dnsutils
+  - massdns
+  - seclists
+  - pv
+  - parallel
+  - libpcap-dev
+  - pkg-config
+
+write_files:
+  - path: /root/bootstrap.sh
+    permissions: '0755'
+    owner: root:root
+    content: |
+      #!/bin/bash
+      set -euxo pipefail
+      export GOPATH=/root/go
+      export PATH="$GOPATH/bin:/root/.local/bin:$PATH"
+
+      # Klona repo (public via HTTPS – ingen git-SSH-nyckel krävs)
+      mkdir -p /root/recon
+      cd /root/recon
+      if [ ! -d live ]; then
+        git clone --depth 1 https://github.com/YOURUSER/YOURREPO.git live
+      fi
+
+      cd /root/recon/live
+      make install
+      make prepare
+
+      # Skapa tmux-session med 3 fönster
+      if ! tmux has-session -t recon 2>/dev/null; then
+        tmux new-session -d -s recon -n shell
+        tmux send-keys -t recon:0.0 "cd /root/recon/live" C-m
+        tmux new-window  -t recon -n log  "bash -lc 'cd /root/recon/live; tail -F out.latest/run.log 2>/dev/null || tail -F out/*/run.log 2>/dev/null || true'"
+        tmux new-window  -t recon -n watch "bash -lc 'cd /root/recon/live; watch -n 5 \"ls -lh out.latest; echo; tail -n 20 out.latest/run.log 2>/dev/null || true\"'"
+      fi
+
+  - path: /usr/local/bin/recon-autoupdate.sh
+    permissions: '0755'
+    owner: root:root
+    content: |
+      #!/bin/bash
+      set -e
+      cd /root/recon/live
+      git pull --ff-only || true
+
+  - path: /etc/systemd/system/recon-autoupdate.service
+    owner: root:root
+    permissions: '0644'
+    content: |
+      [Unit]
+      Description=Auto-update recon repo
+      After=network-online.target
+      Wants=network-online.target
+      [Service]
+      Type=oneshot
+      ExecStart=/usr/local/bin/recon-autoupdate.sh
+
+  - path: /etc/systemd/system/recon-autoupdate.timer
+    owner: root:root
+    permissions: '0644'
+    content: |
+      [Unit]
+      Description=Run recon repo autoupdate daily
+      [Timer]
+      OnBootSec=10min
+      OnUnitActiveSec=24h
+      Persistent=true
+      [Install]
+      WantedBy=timers.target
+
+runcmd:
+  - [ bash, -lc, "/root/bootstrap.sh" ]
+  - [ systemctl, daemon-reload ]
+  - [ systemctl, enable, "--now", "recon-autoupdate.timer" ]

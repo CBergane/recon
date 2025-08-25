@@ -1,0 +1,13 @@
+# bygg/utdata
+out/
+raw/
+out.latest
+
+# lokala inputs som kan vara känsliga
+input/resolvers.txt
+input/ips.txt
+input/cidrs.txt
+
+# editor/os
+.DS_Store
+*.swp

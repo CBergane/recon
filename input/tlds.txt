@@ -1,0 +1,10 @@
+com
+se
+fi
+no
+dk
+net
+org
+io
+app
+co.uk
