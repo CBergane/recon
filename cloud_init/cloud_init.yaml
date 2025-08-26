@@ -1,16 +1,7 @@
 #cloud-config
-ssh_pwauth: false          # stäng lösenords-SSH
-users:
-  # OBS: Om din avbild använder användaren "kali" som standard,
-  # byter du 'name: root' mot 'name: kali' och låter resten vara lika.
-  - name: root
-    shell: /bin/bash
-    sudo: ALL=(ALL) NOPASSWD:ALL
-    lock_passwd: true
-    ssh_authorized_keys:
-      - <ssh key>
-
 package_update: true
+package_upgrade: false
+
 packages:
   - git
   - make
@@ -22,7 +13,7 @@ packages:
   - fonts-liberation
   - pandoc
   - golang-go
-  - dnsutils
+  - bind9-dnsutils
   - massdns
   - seclists
   - pv
@@ -31,69 +22,71 @@ packages:
   - pkg-config
 
 write_files:
+  - path: /etc/profile.d/go.sh
+    permissions: '0644'
+    content: |
+      export GOPATH=/root/go
+      export PATH="$GOPATH/bin:/usr/local/go/bin:$PATH"
+
   - path: /root/bootstrap.sh
     permissions: '0755'
-    owner: root:root
     content: |
       #!/bin/bash
       set -euxo pipefail
       export GOPATH=/root/go
-      export PATH="$GOPATH/bin:/root/.local/bin:$PATH"
+      export PATH="$GOPATH/bin:/root/.local/bin:/usr/local/go/bin:$PATH"
 
-      # Klona repo (public via HTTPS – ingen git-SSH-nyckel krävs)
+      # Workspace
       mkdir -p /root/recon
       cd /root/recon
       if [ ! -d live ]; then
-        git clone --depth 1 https://github.com/CBergane/recon.git live
+        # Replace with your own repo if needed
+        git clone --depth 1 https://github.com/CBergane/recon.git live || mkdir -p live
       fi
 
       cd /root/recon/live
+      # If user-data attached files exist, use them
+      [ -f /tmp/recon.sh ] && cp /tmp/recon.sh ./recon.sh && chmod +x ./recon.sh || true
+      [ -f /tmp/Makefile ] && cp /tmp/Makefile ./Makefile || true
+      [ -f /tmp/resolvers.txt ] && mkdir -p input && cp /tmp/resolvers.txt input/resolvers.txt || true
+      [ -f /tmp/resolvers-trusted.txt ] && mkdir -p input && cp /tmp/resolvers-trusted.txt input/resolvers-trusted.txt || true
+
       make install
       make prepare
 
-      # Skapa tmux-session med 3 fönster
-      if ! tmux has-session -t recon 2>/dev/null; then
-        tmux new-session -d -s recon -n shell
-        tmux send-keys -t recon:0.0 "cd /root/recon/live" C-m
-        tmux new-window  -t recon -n log  "bash -lc 'cd /root/recon/live; tail -F out.latest/run.log 2>/dev/null || tail -F out/*/run.log 2>/dev/null || true'"
-        tmux new-window  -t recon -n watch "bash -lc 'cd /root/recon/live; watch -n 5 \"ls -lh out.latest; echo; tail -n 20 out.latest/run.log 2>/dev/null || true\"'"
-      fi
-
-  - path: /usr/local/bin/recon-autoupdate.sh
+  - path: /root/tmux_recon.sh
     permissions: '0755'
-    owner: root:root
     content: |
       #!/bin/bash
-      set -e
-      cd /root/recon/live
-      git pull --ff-only || true
+      set -Eeuo pipefail
+      SESSION="recon"
+      BASE="/root/recon/live"
+      mkdir -p "$BASE"
+      cd "$BASE"
 
-  - path: /etc/systemd/system/recon-autoupdate.service
-    owner: root:root
-    permissions: '0644'
-    content: |
-      [Unit]
-      Description=Auto-update recon repo
-      After=network-online.target
-      Wants=network-online.target
-      [Service]
-      Type=oneshot
-      ExecStart=/usr/local/bin/recon-autoupdate.sh
+      # Create or attach to session
+      if ! tmux has-session -t "$SESSION" 2>/dev/null; then
+        tmux new-session -d -s "$SESSION" -n run
 
-  - path: /etc/systemd/system/recon-autoupdate.timer
-    owner: root:root
-    permissions: '0644'
-    content: |
-      [Unit]
-      Description=Run recon repo autoupdate daily
-      [Timer]
-      OnBootSec=10min
-      OnUnitActiveSec=24h
-      Persistent=true
-      [Install]
-      WantedBy=timers.target
+        # Window 0: run (ready to execute)
+        tmux send-keys -t "$SESSION:0" 'cd /root/recon/live && clear && echo "[run] make run PROFILE=${PROFILE:-vps}"' C-m
+
+        # Window 1: logs (follow log)
+        tmux new-window -t "$SESSION" -n logs
+        tmux send-keys -t "$SESSION:1" 'cd /root/recon/live && mkdir -p out && ln -sfn "$(pwd)/out/latest" out.latest || true && clear && echo "[logs] tail -F out.latest/run.log" && tail -F out.latest/run.log' C-m
+
+        # Window 2: watch (overview)
+        tmux new-window -t "$SESSION" -n watch
+        tmux send-keys -t "$SESSION:2" 'cd /root/recon/live && watch -n 5 '\''ls -lh out.latest; echo; sed -n "1,20p" out.latest/report.md 2>/dev/null; echo; tail -n 30 out.latest/run.log'\''' C-m
+      fi
+
+      # Auto-run control: touch /root/recon/.autorun to auto start
+      if [ -f /root/recon/.autorun ]; then
+        tmux send-keys -t "$SESSION:0" 'make run PROFILE=vps' C-m
+      fi
 
 runcmd:
   - [ bash, -lc, "/root/bootstrap.sh" ]
-  - [ systemctl, daemon-reload ]
-  - [ systemctl, enable, "--now", "recon-autoupdate.timer" ]
+  - [ bash, -lc, "/root/tmux_recon.sh" ]
+
+final_message: "cloud-init complete on $(hostname) at $(date) — tmux session 'recon' created"
