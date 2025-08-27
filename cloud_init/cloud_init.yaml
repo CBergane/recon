@@ -22,38 +22,14 @@ packages:
   - pkg-config
 
 write_files:
+  # Exportera GOPATH i shell-sessioner (för go install)
   - path: /etc/profile.d/go.sh
     permissions: '0644'
     content: |
       export GOPATH=/root/go
       export PATH="$GOPATH/bin:/usr/local/go/bin:$PATH"
 
-  - path: /root/bootstrap.sh
-    permissions: '0755'
-    content: |
-      #!/bin/bash
-      set -euxo pipefail
-      export GOPATH=/root/go
-      export PATH="$GOPATH/bin:/root/.local/bin:/usr/local/go/bin:$PATH"
-
-      # Workspace
-      mkdir -p /root/recon
-      cd /root/recon
-      if [ ! -d live ]; then
-        # Replace with your own repo if needed
-        git clone --depth 1 https://github.com/CBergane/recon.git live || mkdir -p live
-      fi
-
-      cd /root/recon/live
-      # If user-data attached files exist, use them
-      [ -f /tmp/recon.sh ] && cp /tmp/recon.sh ./recon.sh && chmod +x ./recon.sh || true
-      [ -f /tmp/Makefile ] && cp /tmp/Makefile ./Makefile || true
-      [ -f /tmp/resolvers.txt ] && mkdir -p input && cp /tmp/resolvers.txt input/resolvers.txt || true
-      [ -f /tmp/resolvers-trusted.txt ] && mkdir -p input && cp /tmp/resolvers-trusted.txt input/resolvers-trusted.txt || true
-
-      make install
-      make prepare
-
+  # tmux: ett fönster, tre rutor (vänster stor för körning, höger topp logg, höger botten watch)
   - path: /root/tmux_recon.sh
     permissions: '0755'
     content: |
@@ -64,29 +40,50 @@ write_files:
       mkdir -p "$BASE"
       cd "$BASE"
 
-      # Create or attach to session
       if ! tmux has-session -t "$SESSION" 2>/dev/null; then
-        tmux new-session -d -s "$SESSION" -n run
+        # Pane 0 (vänster 70%) – interaktiv körning
+        tmux new-session -d -s "$SESSION" -n main "cd $BASE; clear; echo '[run] make run PROFILE=\${PROFILE:-vps}'; bash"
+        # Pane 1 (höger 30%)
+        tmux split-window -t "$SESSION:0" -h -p 30 "cd $BASE; bash"
+        # Pane 2 (höger-nere 50% av höger)
+        tmux split-window -t "$SESSION:0.1" -v -p 50 "cd $BASE; bash"
 
-        # Window 0: run (ready to execute)
-        tmux send-keys -t "$SESSION:0" 'cd /root/recon/live && clear && echo "[run] make run PROFILE=${PROFILE:-vps}"' C-m
+        tmux select-pane -t "$SESSION:0.0"; tmux select-pane -T "RUN"
+        tmux select-pane -t "$SESSION:0.1"; tmux select-pane -T "LOGS"
+        tmux select-pane -t "$SESSION:0.2"; tmux select-pane -T "WATCH"
 
-        # Window 1: logs (follow log)
-        tmux new-window -t "$SESSION" -n logs
-        tmux send-keys -t "$SESSION:1" 'cd /root/recon/live && mkdir -p out && ln -sfn "$(pwd)/out/latest" out.latest || true && clear && echo "[logs] tail -F out.latest/run.log" && tail -F out.latest/run.log' C-m
-
-        # Window 2: watch (overview)
-        tmux new-window -t "$SESSION" -n watch
-        tmux send-keys -t "$SESSION:2" 'cd /root/recon/live && watch -n 5 '\''ls -lh out.latest; echo; sed -n "1,20p" out.latest/report.md 2>/dev/null; echo; tail -n 30 out.latest/run.log'\''' C-m
+        # LOGS: håll out.latest uppdaterad och följ run.log
+        tmux send-keys -t "$SESSION:0.1" \
+          'mkdir -p out; while true; do D=$(ls -1td out/* 2>/dev/null | head -1); if [ -n "$D" ]; then ln -sfn "$D" out.latest; echo "[logs] Tailing $D/run.log"; tail -F "$D/run.log"; fi; sleep 2; done' C-m
+        # WATCH: enkel dashboard
+        tmux send-keys -t "$SESSION:0.2" \
+          'mkdir -p out; while true; do D=$(ls -1td out/* 2>/dev/null | head -1); clear; date; if [ -n "$D" ]; then ln -sfn "$D" out.latest; echo; ls -lh "$D" | sed -n "1,40p"; echo; echo "[nuclei]"; tail -n 40 "$D/nuclei_findings.txt" 2>/dev/null || true; fi; sleep 5; done' C-m
       fi
 
-      # Auto-run control: touch /root/recon/.autorun to auto start
+      # Autorun om markeringsfil finns
       if [ -f /root/recon/.autorun ]; then
-        tmux send-keys -t "$SESSION:0" 'make run PROFILE=vps' C-m
+        tmux send-keys -t "$SESSION:0.0" 'make run PROFILE=vps' C-m
       fi
+
+      tmux attach -t "$SESSION"
 
 runcmd:
-  - [ bash, -lc, "/root/bootstrap.sh" ]
+  # 1) Klona ditt repo
+  - [ bash, -lc, "mkdir -p /root/recon && cd /root/recon && if [ ! -d live ]; then git clone --depth 1 https://github.com/CBergane/recon.git live; else cd live && git pull --ff-only || true; fi" ]
+
+  # 2) Länka resolvers till input/ och gör skript körbara
+  - [ bash, -lc, "cd /root/recon/live && mkdir -p input && ln -sfn $(pwd)/resolvers.txt input/resolvers.txt && ln -sfn $(pwd)/resolvers6.txt input/resolvers6.txt && ln -sfn $(pwd)/resolvers-trusted.txt input/resolvers-trusted.txt" ]
+  - [ bash, -lc, "cd /root/recon/live && chmod +x recon.sh || true" ]
+  - [ bash, -lc, "cd /root/recon/live && chmod +x resolver-healthcheck.sh || true" ]
+
+  # (valfritt) kör din healthcheck för resolvers (om den finns i repot)
+  - [ bash, -lc, "cd /root/recon/live && ./resolver-healthcheck.sh || true" ]
+
+  # 3) Installera beroenden & förbered
+  - [ bash, -lc, "source /etc/profile.d/go.sh && cd /root/recon/live && make install" ]
+  - [ bash, -lc, "cd /root/recon/live && make prepare" ]
+
+  # 4) Starta tmux-layouten
   - [ bash, -lc, "/root/tmux_recon.sh" ]
 
-final_message: "cloud-init complete on $(hostname) at $(date) — tmux session 'recon' created"
+final_message: "cloud-init complete — repo klonat, make install/prepare kört, tmux-session 'recon' startad"
