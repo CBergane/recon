@@ -22,14 +22,12 @@ packages:
   - pkg-config
 
 write_files:
-  # GOPATH i alla shell-sessioner
   - path: /etc/profile.d/go.sh
     permissions: '0644'
     content: |
       export GOPATH=/root/go
       export PATH="$GOPATH/bin:/usr/local/go/bin:$PATH"
 
-  # tmux: 1 fönster, 3 rutor (vänster stor "RUN", höger "LOGS" + "WATCH")
   - path: /root/tmux_recon.sh
     permissions: '0755'
     content: |
@@ -39,7 +37,6 @@ write_files:
       BASE="/root/recon/live"
       mkdir -p "$BASE"
       cd "$BASE"
-
       if ! tmux has-session -t "$SESSION" 2>/dev/null; then
         tmux new-session -d -s "$SESSION" -n main "cd $BASE; clear; echo '[run] make run PROFILE=\${PROFILE:-vps}'; bash"
         tmux split-window -t "$SESSION:0" -h -p 30 "cd $BASE; bash"
@@ -50,72 +47,44 @@ write_files:
         tmux send-keys -t "$SESSION:0.1" 'mkdir -p out; while true; do D=$(ls -1td out/* 2>/dev/null | head -1); if [ -n "$D" ]; then ln -sfn "$D" out.latest; echo "[logs] Tailing $D/run.log"; tail -F "$D/run.log"; fi; sleep 2; done' C-m
         tmux send-keys -t "$SESSION:0.2" 'mkdir -p out; while true; do D=$(ls -1td out/* 2>/dev/null | head -1); clear; date; if [ -n "$D" ]; then ln -sfn "$D" out.latest; echo; ls -lh "$D" | sed -n "1,40p"; echo; echo "[nuclei]"; tail -n 40 "$D/nuclei_findings.txt" 2>/dev/null || true; fi; sleep 5; done' C-m
       fi
+      # Viktigt: inget attach i icke-TTY (cloud-init). Attach endast om interaktivt:
+      if [ -t 1 ]; then tmux attach -t "$SESSION"; fi
 
-      if [ -f /root/recon/.autorun ]; then
-        tmux send-keys -t "$SESSION:0.0" 'make run PROFILE=vps' C-m
-      fi
-
-      tmux attach -t "$SESSION"
-
-  # Seed:a övningsmål (apex för enum)
-  - path: /root/recon/live/input/domains.txt
-    permissions: '0644'
-    content: |
-      nmap.org
-      vulnweb.com
-      testfire.net
-
-  # Seed:a hosts som alltid går till httpx/nuclei (ingen portskanning)
-  - path: /root/recon/live/input/hosts.txt
-    permissions: '0644'
-    content: |
-      scanme.nmap.org
-      expired.badssl.com
-      self-signed.badssl.com
-      wrong.host.badssl.com
-
-  # (valfritt) Liten README efter boot
   - path: /root/RECON_BOOT_NOTES.txt
     permissions: '0644'
     content: |
-      Recon bootstrap in progress...
       Check progress:
-        cloud-init status --long
+        cloud-init status --wait
         tail -F /var/log/cloud-init-output.log
-      Stamps:
-        ls -l /var/lib/recon/
       Attach tmux:
         tmux attach -t recon
 
 runcmd:
-  # Stämpel-dir + env
   - [ bash, -lc, "mkdir -p /var/lib/recon && echo '[runcmd] start' | tee -a /var/lib/recon/bootstrap.log" ]
   - [ bash, -lc, "source /etc/profile.d/go.sh" ]
 
-  # 1) Klona ditt repo
-  - [ bash, -lc, "mkdir -p /root/recon && cd /root/recon && if [ ! -d live ]; then git clone --depth 1 https://github.com/CBergane/recon.git live; else cd live && git pull --ff-only || true; fi" ]
-  - [ bash, -lc, "echo '[runcmd] cloned repo' | tee -a /var/lib/recon/bootstrap.log && touch /var/lib/recon/10.cloned" ]
+  # 1) Klona repo robust
+  - [ bash, -lc, "mkdir -p /root/recon && cd /root/recon && if [ -d live/.git ]; then cd live && git pull --ff-only; else rm -rf live && git clone --depth 1 https://github.com/CBergane/recon.git live; fi" ]
+  - [ bash, -lc, "echo '[runcmd] repo ready' | tee -a /var/lib/recon/bootstrap.log && touch /var/lib/recon/10.repo" ]
 
-  # 2) Förbered input + resolvers
-  - [ bash, -lc, "cd /root/recon/live && mkdir -p input && ln -sfn $(pwd)/resolvers.txt input/resolvers.txt && ln -sfn $(pwd)/resolvers6.txt input/resolvers6.txt && ln -sfn $(pwd)/resolvers-trusted.txt input/resolvers-trusted.txt || true" ]
-  - [ bash, -lc, "cd /root/recon/live && chmod +x recon.sh || true" ]
-  - [ bash, -lc, "cd /root/recon/live && chmod +x resolver-healthcheck.sh || true" ]
-  - [ bash, -lc, "cd /root/recon/live && ./resolver-healthcheck.sh || true" ]
-  - [ bash, -lc, "echo '[runcmd] inputs+resolvers ready' | tee -a /var/lib/recon/bootstrap.log && touch /var/lib/recon/20.inputs" ]
+  # 2) Seed input (nu när repo finns)
+  - [ bash, -lc, "mkdir -p /root/recon/live/input && cat > /root/recon/live/input/domains.txt <<'EOF'\nnmap.org\nvulnweb.com\ntestfire.net\nEOF" ]
+  - [ bash, -lc, "cat > /root/recon/live/input/hosts.txt <<'EOF'\nscanme.nmap.org\nexpired.badssl.com\nself-signed.badssl.com\nwrong.host.badssl.com\nEOF" ]
+  - [ bash, -lc, "cd /root/recon/live && ln -sfn $(pwd)/resolvers.txt input/resolvers.txt && ln -sfn $(pwd)/resolvers6.txt input/resolvers6.txt && ln -sfn $(pwd)/resolvers-trusted.txt input/resolvers-trusted.txt || true" ]
+  - [ bash, -lc, "echo '[runcmd] inputs seeded' | tee -a /var/lib/recon/bootstrap.log && touch /var/lib/recon/20.inputs" ]
 
-  # 3) Se till att subfinder-config finns, och “värm upp” subfinder en gång
-  - [ bash, -lc, "mkdir -p /root/.config/subfinder && [ -f /root/.config/subfinder/provider-config.yaml ] || printf 'bevigil: []\nvirustotal: []\n' > /root/.config/subfinder/provider-config.yaml" ]
-  - [ bash, -lc, "subfinder -silent -d nmap.org -o /tmp/subfinder-warmup.txt || true" ]
-  - [ bash, -lc, "echo '[runcmd] subfinder warmed' | tee -a /var/lib/recon/bootstrap.log && touch /var/lib/recon/30.subfinder" ]
-
-  # 4) Installera & förbered (tar tid)
+  # 3) Installera & förbered
   - [ bash, -lc, "cd /root/recon/live && make install" ]
-  - [ bash, -lc, "echo '[runcmd] make install done' | tee -a /var/lib/recon/bootstrap.log && touch /var/lib/recon/40.install" ]
+  - [ bash, -lc, "echo '[runcmd] make install done' | tee -a /var/lib/recon/bootstrap.log && touch /var/lib/recon/30.install" ]
   - [ bash, -lc, "cd /root/recon/live && make prepare" ]
-  - [ bash, -lc, "echo '[runcmd] make prepare done' | tee -a /var/lib/recon/bootstrap.log && touch /var/lib/recon/50.prepare" ]
+  - [ bash, -lc, "echo '[runcmd] make prepare done' | tee -a /var/lib/recon/bootstrap.log && touch /var/lib/recon/40.prepare" ]
 
-  # 5) Starta tmux-layouten sist
-  - [ bash, -lc, "/root/tmux_recon.sh" ]
+  # 4) “Värm upp” subfinder EFTER installation (skapar ~/.config/subfinder/)
+  - [ bash, -lc, "mkdir -p /root/.config/subfinder && subfinder -silent -d nmap.org -o /tmp/sf.warmup || true" ]
+  - [ bash, -lc, "echo '[runcmd] subfinder warmup done' | tee -a /var/lib/recon/bootstrap.log && touch /var/lib/recon/50.subfinder" ]
+
+  # 5) Starta tmux (utan attach)
+  - [ bash, -lc, "/root/tmux_recon.sh || true" ]
   - [ bash, -lc, "echo '[runcmd] tmux started' | tee -a /var/lib/recon/bootstrap.log && touch /var/lib/recon/60.tmux" ]
 
-final_message: "cloud-init complete — repo klonat, subfinder varm, make install/prepare körda, tmux 'recon' startad"
+final_message: "cloud-init complete — repo klart, make install/prepare kört, subfinder warmup, tmux 'recon' kör (attach med: tmux attach -t recon)"
