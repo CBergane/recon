@@ -1,5 +1,11 @@
 SHELL := /bin/bash
 
+# --- stable env även i cloud-init (HOME kan saknas där) ---
+HOME            ?= /root
+XDG_CACHE_HOME  ?= $(HOME)/.cache
+GOCACHE         ?= $(XDG_CACHE_HOME)/go-build
+export HOME XDG_CACHE_HOME GOCACHE
+
 PROG     ?= $(shell basename $$(pwd))
 BASE     := $(HOME)/recon/$(PROG)
 IN       := $(BASE)/input
@@ -16,6 +22,8 @@ help:
 	@echo "Targets: install, prepare, run, run-vps, envcheck, clean"
 
 install:
+	@echo "[*] Ensuring Go cache dirs exist: HOME=$(HOME) GOCACHE=$(GOCACHE)"
+	mkdir -p "$(GOPATH)/bin" "$(GOCACHE)" "$(XDG_CACHE_HOME)"
 	apt-get update -y || true
 	apt-get install -y --no-install-recommends git make jq moreutils chromium fonts-liberation pandoc golang-go massdns seclists pv parallel libpcap-dev pkg-config || true
 	$(GOENV) go install github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest
@@ -29,7 +37,7 @@ install:
 	$(GOENV) go install github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest
 	$(GOENV) go install github.com/projectdiscovery/tlsx/cmd/tlsx@latest
 	$(GOENV) go install github.com/owasp-amass/amass/v4/cmd/amass@latest || true
-	$(GOENV) go install github.com/lc/gau@latest
+	$(GOENV) go install github.com/lc/gau/v2/cmd/gau@latest
 	$(GOENV) go install github.com/tomnomnom/waybackurls@latest
 	$(GOENV) go install github.com/sensepost/gowitness@latest
 	$(GOENV) go install github.com/tomnomnom/assetfinder@latest
@@ -37,8 +45,8 @@ install:
 	python3 -m pip install --user --upgrade pipx || true
 	python3 -m pipx ensurepath || true
 	pipx install dnsgen || true
-	command -v setcap >/dev/null 2>&1 && setcap cap_net_raw,cap_net_admin+eip "$$(command -v naabu)" || true
-	nuclei -update-templates || true
+	-command -v setcap >/dev/null 2>&1 && setcap cap_net_raw,cap_net_admin+eip "$$(command -v naabu)" || true
+	-nuclei -update-templates || true
 
 prepare:
 	mkdir -p $(BASE)/{input,raw,out}
@@ -52,6 +60,9 @@ prepare:
 envcheck:
 	@echo "GOPATH=$(GOPATH)"
 	@echo "PATH=$(PATH)"
+	@echo "HOME=$(HOME)"
+	@echo "XDG_CACHE_HOME=$(XDG_CACHE_HOME)"
+	@echo "GOCACHE=$(GOCACHE)"
 	@command -v subfinder   >/dev/null && echo "subfinder OK"       || echo "subfinder MISSING"
 	@command -v assetfinder >/dev/null && echo "assetfinder OK"     || echo "assetfinder MISSING"
 	@command -v amass       >/dev/null && echo "amass OK"           || echo "amass MISSING"
