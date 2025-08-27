@@ -8,7 +8,7 @@ packages:
   - tmux
   - jq
   - ripgrep
-  - moreutils          # ger 'ts' för tidsstämplad logg
+  - moreutils
   - chromium
   - fonts-liberation
   - pandoc
@@ -20,7 +20,7 @@ packages:
   - parallel
   - libpcap-dev
   - pkg-config
-  - libcap2-bin        # för setcap på naabu (rå sockets)
+  - libcap2-bin
   - ca-certificates
 
 write_files:
