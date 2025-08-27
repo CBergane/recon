@@ -3,11 +3,12 @@
 set -Eeuo pipefail
 shopt -s lastpipe
 
-tslog() { printf '[%(%Y-%m-%d %H:%M:%S)T] %s\n' -1 "$*"; }
-log_info() { tslog "[i] $*"; }
-log_warn() { tslog "[!] $*"; }
-log_err()  { tslog "[x] $*" >&2; }
-die() { log_err "$*"; exit 1; }
+# ---- logging helpers ----
+tslog()   { printf '[%(%Y-%m-%d %H:%M:%S)T] %s\n' -1 "$*"; }
+log_info(){ tslog "[i] $*"; }
+log_warn(){ tslog "[!] $*"; }
+log_err(){  tslog "[x] $*" >&2; }
+die(){ log_err "$*"; exit 1; }
 trap 'log_err "Error on line $LINENO in $0. Aborting."; exit 1' ERR
 
 # ---------- Config ----------
@@ -19,7 +20,7 @@ WORDLIST="${WORDLIST:-/usr/share/seclists/Discovery/DNS/dns-Jhaddix.txt}"
 RESOLVERS="${RESOLVERS:-$IN/resolvers.txt}"
 RESOLVERS6="${RESOLVERS6:-$IN/resolvers6.txt}"
 RESOLVERS_TRUSTED="${RESOLVERS_TRUSTED:-$IN/resolvers-trusted.txt}"
-HOSTS_TXT="${HOSTS_TXT:-$IN/hosts.txt}"    # <- enskilda värdar (t.ex. scanme.nmap.org)
+HOSTS_TXT="${HOSTS_TXT:-$IN/hosts.txt}"    # enskilda värdar (t.ex. scanme.nmap.org)
 PROFILE="${PROFILE:-home}"                 # mobile|home|office|vps
 
 # steg-switchar
@@ -138,13 +139,29 @@ is_wildcard() {
   printf '%s\n%s\n' "$a" "$b" | "$DNSX_BIN" -silent -a -r "$MERGED_RES" | wc -l | awk '{print ($1>=2)?"yes":"no"}'
 }
 
+# ---- Subfinder -dL capability check ----
+supports_dL="no"
+if "$SUBF_BIN" -h 2>&1 | grep -qE -- '-dL[, ]|--list'; then
+  supports_dL="yes"
+fi
+log_info "subfinder -dL support: $supports_dL"  # '-dL' ska finnas i moderna subfinder. :contentReference[oaicite:3]{index=3}
+
 # ---------- Steg 1: Passiv enum ----------
 step1_passive() {
   : > "$RAW/subs_passive.txt"
 
-  "$TIMEOUT_BIN" "$T_SUBF" "$SUBF_BIN" -silent -all -recursive -nc -rl "$SUBF_RL" -dL "$DOMAINS_NORM" -o "$RAW/subs_subfinder.txt" || true
+  if [[ "$supports_dL" == "yes" ]]; then
+    "$TIMEOUT_BIN" "$T_SUBF" "$SUBF_BIN" -silent -all -recursive -nc -rl "$SUBF_RL" \
+      -dL "$DOMAINS_NORM" -o "$RAW/subs_subfinder.txt" || true
+  else
+    # Fallback: kör per domän om -dL saknas (äldre/annan binär)
+    xargs -a "$DOMAINS_NORM" -I{} -P "$NPROC" \
+      "$SUBF_BIN" -silent -all -recursive -nc -rl "$SUBF_RL" -d "{}" \
+      | sort -u > "$RAW/subs_subfinder.txt" || true
+  fi
 
   if [[ -n "$ASSETF_BIN" ]]; then
+    # Korrekt assetfinder-anrop (inga -d/-dL här). :contentReference[oaicite:4]{index=4}
     "$TIMEOUT_BIN" "$T_SUBF" bash -lc '
       set -euo pipefail
       xargs -a "'"$DOMAINS_NORM"'" -I{} -P '"$NPROC"' '"$ASSETF_BIN"' --subs-only "{}" | sort -u
@@ -152,7 +169,8 @@ step1_passive() {
   fi
 
   if [[ -n "$AMASS_BIN" ]]; then
-    "$TIMEOUT_BIN" "$T_SUBF" "$AMASS_BIN" enum -passive -dL "$DOMAINS_NORM" -silent -norecursive -noalts | sort -u > "$RAW/subs_amass.txt" || true
+    "$TIMEOUT_BIN" "$T_SUBF" "$AMASS_BIN" enum -passive -dL "$DOMAINS_NORM" -silent -norecursive -noalts \
+      | sort -u > "$RAW/subs_amass.txt" || true
   fi
 
   cat "$RAW"/subs_*.txt 2>/dev/null | sort -u > "$RAW/subs_passive.txt"
@@ -197,7 +215,7 @@ step3_resolve() {
       # wildcard-zon: behåll passiva träffar utan wildcard-filter (låter httpx/nuclei avgöra)
       printf '%s\n' "$candidates" >> "$OUT/subdomains.txt"
     else
-      # normal: resolva + wildcard-filter
+      # normal: resolva + wildcard-filter (dnsx -wd)  :contentReference[oaicite:5]{index=5}
       printf '%s\n' "$candidates" | "$DNSX_BIN" -silent -r "$MERGED_RES" -wd "$d" >> "$OUT/subdomains.txt" || true
     fi
   done < "$DOMAINS_NORM"
@@ -271,12 +289,12 @@ step7_ports_phaseB() {
     "$TIMEOUT_BIN" "$T_NAABU" "$NAABU_BIN" -list "$OUT/hit_ips.txt" \
       -p "$DEEP_PORTS" -rate "$NAABU_RATE" -json -o "$OUT/open_ports_B.json" || true
   fi
-  cat "$OUT/open_ports_A.json" "$OUT/open_ports_B.json" 2>/dev/null > "$OUT/open_ports.json" || cp "$OUT/open_ports_A.json" "$OUT/open_ports.json" 2>/dev/null || true
+  cat "$OUT/open_ports_A.json" "$OUT/open_ports_B.json" 2>/dev/null > "$OUT/open_ports.json"  || cp "$OUT/open_ports_A.json" "$OUT/open_ports.json" 2>/dev/null || true
   jq -r '.ip+":"+(.port|tostring)' "$OUT/open_ports.json" 2>/dev/null | sort -u > "$OUT/open_ports.txt" || : > "$OUT/open_ports.txt"
   log_info "Open ports (ip:port): $(wc -l < "$OUT/open_ports.txt" 2>/dev/null || echo 0)"
 }
 
-# ---------- Steg 8: HTTPX (från subdomäner + ports + hosts.txt) ----------
+# ---------- Steg 8: HTTPX (subdomäner + ip:port + hosts.txt) ----------
 step8_httpx() {
   : > "$OUT/urls_from_ports.txt"; : > "$OUT/httpx_all.json"
 
