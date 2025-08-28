@@ -24,7 +24,7 @@ packages:
   - ca-certificates
 
 write_files:
-  # GOPATH/PATH + cache i alla shells
+  # Go env for all shells
   - path: /etc/profile.d/go.sh
     permissions: '0644'
     content: |
@@ -33,13 +33,22 @@ write_files:
       export XDG_CACHE_HOME=/root/.cache
       export GOCACHE=/root/.cache/go-build
       export PATH="$GOPATH/bin:/usr/local/go/bin:/usr/sbin:/usr/bin:/bin:$PATH"
+      export GOTOOLCHAIN=auto
 
-  # tmux: 1 fönster, 3 rutor (RUN | LOGS | WATCH) – laddar Go-miljön i varje ruta
+  # (optional) ProjectDiscovery Cloud token for asnmap / other PD tools
+  # Fill in before boot or edit later and `source` it.
+  - path: /etc/profile.d/pdcp.sh
+    permissions: '0644'
+    content: |
+      # export PDCP_API_KEY="PUT_YOUR_PDCP_TOKEN_HERE"
+
+  # tmux layout: 1 window, 3 panes (RUN | LOGS | WATCH)
   - path: /root/tmux_recon.sh
     permissions: '0755'
     content: |
       #!/bin/bash
       set -Eeuo pipefail
+      source /etc/profile.d/go.sh 2>/dev/null || true
       SESSION="recon"
       BASE="/root/recon/live"
       mkdir -p "$BASE"
@@ -51,33 +60,30 @@ write_files:
         tmux select-pane -t "$SESSION:0.0"; tmux select-pane -T "RUN"
         tmux select-pane -t "$SESSION:0.1"; tmux select-pane -T "LOGS"
         tmux select-pane -t "$SESSION:0.2"; tmux select-pane -T "WATCH"
-        tmux send-keys -t "$SESSION:0.1" 'source /etc/profile.d/go.sh 2>/dev/null || true; mkdir -p out; while true; do D=$(ls -1td out/* 2>/dev/null | head -1); if [ -n "$D" ]; then ln -sfn "$D" out.latest; echo "[logs] Tailing $D/run.log"; tail -F "$D/run.log"; fi; sleep 2; done' C-m
+        tmux send-keys -t "$SESSION:0.1" 'source /etc/profile.d/go.sh 2>/dev/null || true; mkdir -p out; while true; do D=$(ls -1td out/* 2>/dev/null | head -1); if [ -n "$D" ]; then ln -sfn "$D" out.latest; echo "[logs] tail -F $D/run.log"; tail -F "$D/run.log"; fi; sleep 2; done' C-m
         tmux send-keys -t "$SESSION:0.2" 'source /etc/profile.d/go.sh 2>/dev/null || true; mkdir -p out; while true; do D=$(ls -1td out/* 2>/dev/null | head -1); clear; date; if [ -n "$D" ]; then ln -sfn "$D" out.latest; echo; ls -lh "$D" | sed -n "1,40p"; echo; echo "[nuclei]"; tail -n 40 "$D/nuclei_findings.txt" 2>/dev/null || true; fi; sleep 5; done' C-m
       fi
-      # attach bara om interaktiv terminal finns (inte i cloud-init)
       if [ -t 1 ]; then tmux attach -t "$SESSION"; fi
 
-  # (valfritt) bootstrap-notis
+  # small boot notes
   - path: /root/RECON_BOOT_NOTES.txt
     permissions: '0644'
     content: |
       Check progress:
         cloud-init status --wait
         tail -F /var/log/cloud-init-output.log
-      Attach tmux:
-        tmux attach -t recon
+      Attach tmux: tmux attach -t recon
 
 runcmd:
-  # Stamps + env
   - [ bash, -lc, "mkdir -p /var/lib/recon && echo '[runcmd] start' | tee -a /var/lib/recon/bootstrap.log" ]
   - [ bash, -lc, "source /etc/profile.d/go.sh" ]
   - [ bash, -lc, "mkdir -p /root/.cache/go-build /root/go/bin" ]
 
-  # 1) Klona repo robust (hantera om live/ finns utan .git)
+  # 1) Clone repo (robust if rerun)
   - [ bash, -lc, "mkdir -p /root/recon && cd /root/recon && if [ -d live/.git ]; then cd live && git pull --ff-only; else rm -rf live && git clone --depth 1 https://github.com/CBergane/recon.git live; fi" ]
   - [ bash, -lc, "echo '[runcmd] repo ready' | tee -a /var/lib/recon/bootstrap.log && touch /var/lib/recon/10.repo" ]
 
-  # 2) Seed input EFTER klon (för att inte skapa live/ i förväg)
+  # 2) Seed input (legal demo targets)
   - [ bash, -lc, "mkdir -p /root/recon/live/input && cat > /root/recon/live/input/domains.txt <<'EOF'\nnmap.org\nvulnweb.com\ntestfire.net\nEOF" ]
   - [ bash, -lc, "cat > /root/recon/live/input/hosts.txt <<'EOF'\nscanme.nmap.org\nexpired.badssl.com\nself-signed.badssl.com\nwrong.host.badssl.com\nEOF" ]
   - [ bash, -lc, "cd /root/recon/live && ln -sfn $(pwd)/resolvers.txt input/resolvers.txt || true" ]
@@ -85,17 +91,20 @@ runcmd:
   - [ bash, -lc, "cd /root/recon/live && ln -sfn $(pwd)/resolvers-trusted.txt input/resolvers-trusted.txt || true" ]
   - [ bash, -lc, "echo '[runcmd] inputs seeded' | tee -a /var/lib/recon/bootstrap.log && touch /var/lib/recon/20.inputs" ]
 
-  # 3) make install/prepare med explicit env (HOME/GOCACHE/…)
-  - [ env, HOME=/root, XDG_CACHE_HOME=/root/.cache, GOCACHE=/root/.cache/go-build, GOPATH=/root/go, PATH=/root/go/bin:/usr/local/go/bin:/usr/sbin:/usr/bin:/bin, bash, -lc, "cd /root/recon/live && make install" ]
+  # 3) Install + prepare with explicit env (ensures Go cache/paths)
+  - [ env, HOME=/root, XDG_CACHE_HOME=/root/.cache, GOCACHE=/root/.cache/go-build, GOPATH=/root/go, PATH=/root/go/bin:/usr/local/go/bin:/usr/sbin:/usr/bin:/bin, GOTOOLCHAIN=auto, bash, -lc, "cd /root/recon/live && make install" ]
   - [ bash, -lc, "echo '[runcmd] make install done' | tee -a /var/lib/recon/bootstrap.log && touch /var/lib/recon/30.install" ]
-  - [ env, HOME=/root, XDG_CACHE_HOME=/root/.cache, GOCACHE=/root/.cache/go-build, GOPATH=/root/go, PATH=/root/go/bin:/usr/local/go/bin:/usr/sbin:/usr/bin:/bin, bash, -lc, "cd /root/recon/live && make prepare" ]
+  - [ env, HOME=/root, XDG_CACHE_HOME=/root/.cache, GOCACHE=/root/.cache/go-build, GOPATH=/root/go, PATH=/root/go/bin:/usr/local/go/bin:/usr/sbin:/usr/bin:/bin, GOTOOLCHAIN=auto, bash, -lc, "cd /root/recon/live && make prepare" ]
   - [ bash, -lc, "echo '[runcmd] make prepare done' | tee -a /var/lib/recon/bootstrap.log && touch /var/lib/recon/40.prepare" ]
 
-  # 4) Värm subfinder EFTER install (skapar ~/.config/subfinder/provider-config.yaml)
-  - [ env, HOME=/root, XDG_CACHE_HOME=/root/.cache, GOCACHE=/root/.cache/go-build, PATH=/root/go/bin:/usr/local/go/bin:/usr/sbin:/usr/bin:/bin, bash, -lc, "mkdir -p /root/.config/subfinder && subfinder -silent -d nmap.org -o /tmp/sf.warmup || true" ]
+  # 4) Subfinder warmup (creates ~/.config/subfinder/provider-config.yaml)
+  - [ env, HOME=/root, XDG_CACHE_HOME=/root/.cache, GOCACHE=/root/.cache/go-build, PATH=/root/go/bin:/usr/local/go/bin:/usr/sbin:/usr/bin:/bin, bash, -lc, "subfinder -silent -d nmap.org -o /tmp/sf.warmup || true" ]
   - [ bash, -lc, "echo '[runcmd] subfinder warmup done' | tee -a /var/lib/recon/bootstrap.log && touch /var/lib/recon/50.subfinder" ]
 
-  # 5) Starta tmux (detached)
+  # 5) Ensure naabu capabilities (SYN scan without root)
+  - [ bash, -lc, "command -v setcap >/dev/null 2>&1 && setcap cap_net_raw,cap_net_admin+eip $(command -v naabu) || true" ]
+
+  # 6) Start tmux (detached)
   - [ bash, -lc, "chmod +x /root/tmux_recon.sh && /root/tmux_recon.sh || true" ]
   - [ bash, -lc, "echo '[runcmd] tmux started' | tee -a /var/lib/recon/bootstrap.log && touch /var/lib/recon/60.tmux" ]
 
