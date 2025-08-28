@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
-# recon.sh — robust bug bounty recon (IPv6-aware, wildcard-aware, hosts seed)
+# recon.sh — robust bug bounty recon (IPv4/IPv6, wildcard-aware, token-aware)
 set -Eeuo pipefail
 shopt -s lastpipe
 
-# ---- logging helpers ----
-tslog()   { printf '[%(%Y-%m-%d %H:%M:%S)T] %s\n' -1 "$*"; }
-log_info(){ tslog "[i] $*"; }
-log_warn(){ tslog "[!] $*"; }
-log_err(){  tslog "[x] $*" >&2; }
-die(){ log_err "$*"; exit 1; }
+# ---------- Logging ----------
+tslog()    { printf '[%(%Y-%m-%d %H:%M:%S)T] %s\n' -1 "$*"; }
+log_info() { tslog "[i] $*"; }
+log_warn() { tslog "[!] $*"; }
+log_err()  { tslog "[x] $*" >&2; }
+die()      { log_err "$*"; exit 1; }
 trap 'log_err "Error on line $LINENO in $0. Aborting."; exit 1' ERR
 
 # ---------- Config ----------
@@ -16,24 +16,26 @@ BASE="${BASE:-$(pwd)}"
 IN="${IN:-$BASE/input}"
 OUTROOT="${OUTROOT:-$BASE/out}"
 RAW="${RAW:-$BASE/raw}"
+
 WORDLIST="${WORDLIST:-/usr/share/seclists/Discovery/DNS/dns-Jhaddix.txt}"
 RESOLVERS="${RESOLVERS:-$IN/resolvers.txt}"
 RESOLVERS6="${RESOLVERS6:-$IN/resolvers6.txt}"
 RESOLVERS_TRUSTED="${RESOLVERS_TRUSTED:-$IN/resolvers-trusted.txt}"
-HOSTS_TXT="${HOSTS_TXT:-$IN/hosts.txt}"    # enskilda värdar (t.ex. scanme.nmap.org)
-PROFILE="${PROFILE:-home}"                 # mobile|home|office|vps
+HOSTS_TXT="${HOSTS_TXT:-$IN/hosts.txt}"    # manuella värdar (http/https seeds)
 
-# steg-switchar
+PROFILE="${PROFILE:-home}"  # mobile|home|office|vps
+
+# Skippa-steg (1=skippa)
 SKIP_ASN="${SKIP_ASN:-0}"
 SKIP_KATANA="${SKIP_KATANA:-0}"
 SKIP_HISTORY="${SKIP_HISTORY:-0}"
 SKIP_NUCLEI="${SKIP_NUCLEI:-0}"
 SKIP_SCREEN="${SKIP_SCREEN:-0}"
 
-# valfri URL-filter (regex)
+# (valfritt) regex för URL-scope
 SCOPE_URL_REGEX="${SCOPE_URL_REGEX:-}"
 
-# concurrency
+# Concurrency per profil
 NPROC="$(command -v nproc >/dev/null 2>&1 && nproc || echo 4)"
 HTTPX_C="${HTTPX_C:-$(( NPROC*8 ))}"
 KATANA_C="${KATANA_C:-$(( NPROC*2 ))}"
@@ -54,32 +56,27 @@ T_HTTPX="${T_HTTPX:-14m}"
 T_KATANA="${T_KATANA:-12m}"
 T_HISTORY="${T_HISTORY:-15m}"
 T_NUCLEI="${T_NUCLEI:-16m}"
+T_ASN="${T_ASN:-6m}"
 
 TOP_PORTS="${TOP_PORTS:-100}"
 DEEP_PORTS="${DEEP_PORTS:-1-65535}"
 HIST_P="${HIST_P:-6}"
 
+# ---------- Helpers ----------
 need(){ command -v "$1" >/dev/null || die "Missing: $1"; }
-opt(){ command -v "$1" >/dev/null || log_info "(optional) $1 missing — skipping related step."; }
+opt(){  command -v "$1" >/devnull 2>&1 || log_info "(optional) $1 missing — skipping related step."; }
 
 # Hårda beroenden
-for b in subfinder dnsx naabu httpx jq; do need "$b"; done
+for b in subfinder dnsx naabu httpx jq; do need "$b"; done || true
 command -v timeout >/dev/null || need gtimeout
 
-# Mjuka beroenden
-opt assetfinder; opt amass; opt puredns; opt shuffledns; opt dnsgen; opt tlsx; opt katana; opt nuclei; opt gau; opt waybackurls; opt gowitness; opt pandoc; opt chromium; opt asnmap; opt mapcidr
-
-# Binaries
+# ---------- Binaries discovery ----------
 TIMEOUT_BIN="$(command -v timeout || command -v gtimeout)"
 SUBF_BIN="$(command -v subfinder)"
 ASSETF_BIN="$(command -v assetfinder || true)"
 AMASS_BIN="$(command -v amass || true)"
 DNSX_BIN="$(command -v dnsx)"
 NAABU_BIN="$(command -v naabu)"
-HTTPX_BIN="$(command -v httpx)"
-PUREDNS_BIN="$(command -v puredns || true)"
-SHUFFLE_BIN="$(command -v shuffledns || true)"
-DNSGEN_BIN="$(command -v dnsgen || true)"
 TLXS_BIN="$(command -v tlsx || true)"
 KATANA_BIN="$(command -v katana || true)"
 NUCLEI_BIN="$(command -v nuclei || true)"
@@ -91,8 +88,22 @@ MAPCIDR_BIN="$(command -v mapcidr || true)"
 JQ_BIN="$(command -v jq)"
 PANDOC_BIN="$(command -v pandoc || true)"
 CHROMIUM_BIN="$(command -v chromium || true)"
+PUREDNS_BIN="$(command -v puredns || true)"
+SHUFFLE_BIN="$(command -v shuffledns || true)"
+DNSGEN_BIN="$(command -v dnsgen || true)"
 
-# Dir setup & logging
+# httpx: välj rätt binär (undvik python3-httpx-krock) + feature-detektera -c
+if [ -x "$HOME/go/bin/httpx" ]; then
+  HTTPX_BIN="$HOME/go/bin/httpx"
+elif command -v httpx-toolkit >/dev/null 2>&1; then
+  HTTPX_BIN="$(command -v httpx-toolkit)"  # Debian/Kali namn för PD-CLI
+else
+  HTTPX_BIN="$(command -v httpx)"         # kan vara python3-httpx (utan -c etc.)
+fi
+HTTPX_SUPPORTS_C="no"
+"$HTTPX_BIN" -h 2>&1 | grep -qE '\s-c([, ]|=)|--concurrency' && HTTPX_SUPPORTS_C="yes"
+
+# ---------- Dirs & logging ----------
 mkdir -p "$IN" "$RAW"
 RUN_ID="$(date +%Y%m%d-%H%M%S)"
 OUT="$OUTROOT/$RUN_ID"
@@ -100,14 +111,14 @@ mkdir -p "$OUT"
 LOG="$OUT/run.log"
 exec > >(ts '[%Y-%m-%d %H:%M:%S]' | tee -a "$LOG") 2> >(ts '[%Y-%m-%d %H:%M:%S]' | tee -a "$LOG" >&2)
 
-# Inputs
+# ---------- Inputs ----------
 DOMAINS_TXT="${DOMAINS_TXT:-$IN/domains.txt}"
 DOMAINS_NORM="$IN/domains.norm.txt"
 ORGS_FILE="${ORGS_FILE:-$IN/orgs.txt}"
 ASNS_FILE="${ASNS_FILE:-$IN/asn.txt}"
 
 [[ -s "$DOMAINS_TXT" ]] || die "Missing $DOMAINS_TXT"
-tr '[:upper:]' '[:lower:]' < "$DOMAINS_TXT" | sed 's/\r$//' | grep -E '^[a-z0-9.-]+$' | sed 's/^*\.*//' | sort -u > "$DOMAINS_NORM"
+tr '[:upper:]' '[:lower:]' < "$DOMAINS_TXT" | sed 's/\r$//' | grep -E '^[a-z0-9.-]+$' | sed 's/^\*\.*//' | sort -u > "$DOMAINS_NORM"
 
 log_info "RUN_ID   : $RUN_ID"
 log_info "OUT_DIR  : $OUT"
@@ -118,19 +129,17 @@ log_info "RESOLVERS6: $RESOLVERS6"
 log_info "TRUSTED  : $RESOLVERS_TRUSTED"
 [[ -s "$HOSTS_TXT" ]] && log_info "HOSTS    : $HOSTS_TXT"
 
-# Merge IPv4+IPv6 resolvers
+# Sammanfoga IPv4/IPv6-resolvers
 MERGED_RES="$OUT/resolvers.merged.txt"
 ( [ -f "$RESOLVERS" ] && cat "$RESOLVERS" || true
   [ -f "$RESOLVERS6" ] && cat "$RESOLVERS6" || true ) \
   | sed 's/\r$//' | grep -E '^[0-9a-fA-F:.]+$' | sort -u > "$MERGED_RES"
-if [[ ! -s "$MERGED_RES" ]]; then
-  log_warn "No resolvers found in $RESOLVERS or $RESOLVERS6."
-fi
+[[ -s "$MERGED_RES" ]] || log_warn "No resolvers found in $RESOLVERS or $RESOLVERS6."
 
-# Valfritt URL-filter
-scope_filter() { if [[ -n "$SCOPE_URL_REGEX" ]]; then grep -E "$SCOPE_URL_REGEX" || true; else cat; fi; }
+# URL-scope-filter
+scope_filter(){ if [[ -n "$SCOPE_URL_REGEX" ]]; then grep -E "$SCOPE_URL_REGEX" || true; else cat; fi; }
 
-# Wildcard-detektor (två slumpmässiga labels som båda resolvas => wildcard)
+# Wildcard-detektor
 is_wildcard() {
   local root="$1"
   local a b
@@ -139,38 +148,48 @@ is_wildcard() {
   printf '%s\n%s\n' "$a" "$b" | "$DNSX_BIN" -silent -a -r "$MERGED_RES" | wc -l | awk '{print ($1>=2)?"yes":"no"}'
 }
 
-# ---- Subfinder -dL capability check ----
+# Subfinder -dL stöd?
 supports_dL="no"
-if "$SUBF_BIN" -h 2>&1 | grep -qE -- '-dL[, ]|--list'; then
-  supports_dL="yes"
-fi
-log_info "subfinder -dL support: $supports_dL"  # '-dL' ska finnas i moderna subfinder. :contentReference[oaicite:3]{index=3}
+"$SUBF_BIN" -h 2>&1 | grep -qE -- '-dL[, ]|--list' && supports_dL="yes"
+log_info "subfinder -dL support: $supports_dL"  # se PD-dokumentation för flaggor.
 
 # ---------- Steg 1: Passiv enum ----------
 step1_passive() {
   : > "$RAW/subs_passive.txt"
 
+  # Subfinder (med -dL om möjligt)
   if [[ "$supports_dL" == "yes" ]]; then
     "$TIMEOUT_BIN" "$T_SUBF" "$SUBF_BIN" -silent -all -recursive -nc -rl "$SUBF_RL" \
       -dL "$DOMAINS_NORM" -o "$RAW/subs_subfinder.txt" || true
   else
-    # Fallback: kör per domän om -dL saknas (äldre/annan binär)
     xargs -a "$DOMAINS_NORM" -I{} -P "$NPROC" \
       "$SUBF_BIN" -silent -all -recursive -nc -rl "$SUBF_RL" -d "{}" \
       | sort -u > "$RAW/subs_subfinder.txt" || true
   fi
 
+  # Assetfinder (korrekt CLI: --subs-only)
   if [[ -n "$ASSETF_BIN" ]]; then
-    # Korrekt assetfinder-anrop (inga -d/-dL här). :contentReference[oaicite:4]{index=4}
     "$TIMEOUT_BIN" "$T_SUBF" bash -lc '
       set -euo pipefail
       xargs -a "'"$DOMAINS_NORM"'" -I{} -P '"$NPROC"' '"$ASSETF_BIN"' --subs-only "{}" | sort -u
     ' > "$RAW/subs_assetfinder.txt" || true
   fi
 
+  # Amass (använd -df om stöd finns, med flagg-autodetektion)
   if [[ -n "$AMASS_BIN" ]]; then
-    "$TIMEOUT_BIN" "$T_SUBF" "$AMASS_BIN" enum -passive -dL "$DOMAINS_NORM" -silent -norecursive -noalts \
-      | sort -u > "$RAW/subs_amass.txt" || true
+    AMASS_HELP="$("$AMASS_BIN" enum -h 2>&1 || true)"
+    if grep -q -- '-df' <<<"$AMASS_HELP"; then
+      AMASS_ARGS=(enum -passive -df "$DOMAINS_NORM" -silent)
+      grep -q -- '-noalts'      <<<"$AMASS_HELP" && AMASS_ARGS+=(-noalts)
+      grep -q -- '-norecursive' <<<"$AMASS_HELP" && AMASS_ARGS+=(-norecursive)
+      "$TIMEOUT_BIN" "$T_SUBF" "$AMASS_BIN" "${AMASS_ARGS[@]}" \
+        | sort -u > "$RAW/subs_amass.txt" || true
+    else
+      # fallback: per domän
+      xargs -a "$DOMAINS_NORM" -I{} -P "$NPROC" \
+        "$AMASS_BIN" enum -passive -d "{}" -silent \
+        | sort -u > "$RAW/subs_amass.txt" || true
+    fi
   fi
 
   cat "$RAW"/subs_*.txt 2>/dev/null | sort -u > "$RAW/subs_passive.txt"
@@ -180,7 +199,7 @@ step1_passive() {
 # ---------- Steg 2: Brute + permutations ----------
 step2_bruteforce() {
   : > "$RAW/brute.txt"; : > "$RAW/perms.txt"
-  if [[ -n "$PUREDNS_BIN" ]]; then
+  if [[ -n "$PUREDNS_BIN" && -s "$WORDLIST" ]]; then
     while read -r d; do
       if [[ -s "$RESOLVERS_TRUSTED" ]]; then
         "$TIMEOUT_BIN" "$T_DNSX" "$PUREDNS_BIN" bruteforce "$WORDLIST" "$d" -r "$MERGED_RES" \
@@ -191,14 +210,16 @@ step2_bruteforce() {
       fi
     done < "$DOMAINS_NORM" | sort -u > "$RAW/brute.txt"
   fi
+
   if [[ -n "$DNSGEN_BIN" && -n "$SHUFFLE_BIN" ]]; then
     "$DNSGEN_BIN" "$RAW/subs_passive.txt" | "$SHUFFLE_BIN" -list - -r "$MERGED_RES" -mode resolve -silent > "$RAW/perms.txt" || true
   fi
+
   cat "$RAW/brute.txt" "$RAW/perms.txt" 2>/dev/null | sort -u > "$RAW/subs_active.txt"
   log_info "Active (brute+perms): $(wc -l < "$RAW/subs_active.txt" 2>/dev/null || echo 0)"
 }
 
-# ---------- Steg 3: Resolve med wildcard-hantering ----------
+# ---------- Steg 3: Resolve + wildcard-policy ----------
 step3_resolve() {
   : > "$OUT/subdomains_unfiltered.txt"
   cat "$RAW/subs_passive.txt" "$RAW/subs_active.txt" 2>/dev/null | sort -u >> "$OUT/subdomains_unfiltered.txt"
@@ -212,10 +233,8 @@ step3_resolve() {
 
     if [[ "$(is_wildcard "$d")" == "yes" ]]; then
       echo "$d" >> "$OUT/wildcard_domains.txt"
-      # wildcard-zon: behåll passiva träffar utan wildcard-filter (låter httpx/nuclei avgöra)
       printf '%s\n' "$candidates" >> "$OUT/subdomains.txt"
     else
-      # normal: resolva + wildcard-filter (dnsx -wd)  :contentReference[oaicite:5]{index=5}
       printf '%s\n' "$candidates" | "$DNSX_BIN" -silent -r "$MERGED_RES" -wd "$d" >> "$OUT/subdomains.txt" || true
     fi
   done < "$DOMAINS_NORM"
@@ -223,7 +242,6 @@ step3_resolve() {
   sort -u -o "$OUT/subdomains.txt" "$OUT/subdomains.txt"
   log_info "Resolved subdomains (after wildcard policy): $(wc -l < "$OUT/subdomains.txt" 2>/dev/null || echo 0)"
 
-  # IP-lista (endast det som faktiskt resolvats via dnsx)
   "$DNSX_BIN" -silent -a -r "$MERGED_RES" -l "$OUT/subdomains.txt" | awk '{print $2}' | sed 's/.$//' | sort -u > "$OUT/ips.txt" || true
   log_info "IPs in scope (from DNS): $(wc -l < "$OUT/ips.txt" 2>/dev/null || echo 0)"
 }
@@ -238,25 +256,44 @@ step4_tlsx() {
   fi
 }
 
-# ---------- Steg 5: ASN/ORG -> CIDRs ----------
+# ---------- Steg 5: ASN/ORG -> CIDRs (token-aware + timeout) ----------
 step5_asn_scope() {
   [[ "${SKIP_ASN}" == "1" ]] && { log_info "Skip ASN scope (SKIP_ASN=1)"; : > "$OUT/cidrs.txt"; return 0; }
   : > "$OUT/cidrs.txt"
+
   if command -v asnmap >/dev/null; then
-    [[ -s "$ASNS_FILE" ]] && asnmap -silent -f "$ASNS_FILE" >> "$OUT/cidrs.txt" || true
-    if [[ -s "$ORGS_FILE" ]]; then
-      while read -r org; do [[ -n "$org" ]] && echo "$org" | asnmap -silent || true; done < "$ORGS_FILE" >> "$OUT/cidrs.txt" || true
+    if [[ -z "${PDCP_API_KEY:-}" ]]; then
+      log_warn "asnmap kräver PDCP_API_KEY (ProjectDiscovery Cloud token). Sätt den eller kör med SKIP_ASN=1."
     fi
+
+    # ASNs från fil
+    if [[ -s "$ASNS_FILE" ]]; then
+      "$TIMEOUT_BIN" "$T_ASN" asnmap -silent -f "$ASNS_FILE" >> "$OUT/cidrs.txt" 2>>"$LOG" || \
+        log_warn "asnmap -f $ASNS_FILE nådde timeout ($T_ASN)"
+    fi
+
+    # ORGs från fil (parallellt, timeout per rad)
+    if [[ -s "$ORGS_FILE" ]]; then
+      xargs -a "$ORGS_FILE" -n1 -P "$NPROC" -I{} bash -lc '
+        d="$1"; t="$2"
+        '"$TIMEOUT_BIN"' "$t" asnmap -silent -org "$d" || exit 0
+      ' _ "{}" "$T_ASN" >> "$OUT/cidrs.txt" 2>>"$LOG" || true
+    fi
+  else
+    log_info "asnmap saknas — hoppar över ASN→CIDR."
   fi
+
   if command -v mapcidr >/dev/null && [[ -s "$OUT/cidrs.txt" ]]; then
-    mapcidr -aggregate -cidr -l "$OUT/cidrs.txt" > "$OUT/cidrs.agg.txt" 2>/dev/null || cp "$OUT/cidrs.txt" "$OUT/cidrs.agg.txt"
+    "$TIMEOUT_BIN" "$T_ASN" mapcidr -aggregate -cidr -l "$OUT/cidrs.txt" > "$OUT/cidrs.agg.txt" 2>>"$LOG" || \
+      cp "$OUT/cidrs.txt" "$OUT/cidrs.agg.txt"
     mv "$OUT/cidrs.agg.txt" "$OUT/cidrs.txt"
   fi
-  sort -u -o "$OUT/cidrs.txt" "$OUT/cidrs.txt" || true
+
+  sed -n 's/\r$//;/^[0-9:/.-]\+$/p' "$OUT/cidrs.txt" | sort -u -o "$OUT/cidrs.txt" || true
   log_info "CIDRs (ASN/ORG): $(wc -l < "$OUT/cidrs.txt" 2>/dev/null || echo 0)"
 }
 
-# ---------- Steg 6: Portscan fas A (top-ports) ----------
+# ---------- Steg 6: Portscan A (top-ports) ----------
 step6_ports_phaseA() {
   : > "$OUT/open_ports_A.json"
   : > "$OUT/targets_scan.txt"
@@ -269,7 +306,7 @@ step6_ports_phaseA() {
   fi
 
   if ! getcap "$NAABU_BIN" >/dev/null 2>&1; then
-    log_warn "naabu lacks cap_net_raw — run as root or: setcap cap_net_raw,cap_net_admin+eip $(command -v naabu)"
+    log_warn "naabu lacks cap_net_raw — run as root eller: setcap cap_net_raw,cap_net_admin+eip $(command -v naabu)"
   fi
 
   "$TIMEOUT_BIN" "$T_NAABU" "$NAABU_BIN" -list "$OUT/targets_scan.txt" \
@@ -278,7 +315,7 @@ step6_ports_phaseA() {
   log_info "Phase A JSON rows: $(wc -l < "$OUT/open_ports_A.json" 2>/dev/null || echo 0)"
 }
 
-# ---------- Steg 7: Portscan fas B (djup) ----------
+# ---------- Steg 7: Portscan B (deep) ----------
 step7_ports_phaseB() {
   : > "$OUT/hit_ips.txt"
   [[ -s "$OUT/open_ports_A.json" ]] && jq -r '.ip' "$OUT/open_ports_A.json" | grep -E '^[0-9.]+$' | sort -u > "$OUT/hit_ips.txt" || true
@@ -294,11 +331,10 @@ step7_ports_phaseB() {
   log_info "Open ports (ip:port): $(wc -l < "$OUT/open_ports.txt" 2>/dev/null || echo 0)"
 }
 
-# ---------- Steg 8: HTTPX (subdomäner + ip:port + hosts.txt) ----------
+# ---------- Steg 8: HTTPX (domäner + ip:port + hosts.txt) ----------
 step8_httpx() {
   : > "$OUT/urls_from_ports.txt"; : > "$OUT/httpx_all.json"
 
-  # ip:port -> URL
   declare -A P2S=([443]=https [8443]=https [9443]=https [10443]=https)
   if [[ -s "$OUT/open_ports.txt" ]]; then
     while IFS=: read -r ip port; do
@@ -306,7 +342,6 @@ step8_httpx() {
     done < "$OUT/open_ports.txt" | sort -u > "$OUT/urls_from_ports.txt"
   fi
 
-  # hosts.txt -> seed URLs (force)
   : > "$OUT/seed_urls.txt"
   if [[ -s "$HOSTS_TXT" ]]; then
     awk '{print "http://"$1"\nhttps://"$1}' "$HOSTS_TXT" | sort -u >> "$OUT/seed_urls.txt"
@@ -314,23 +349,22 @@ step8_httpx() {
 
   PORTS="${HTTPX_PORTS:-443,80,8080,8443,8000,8888,3000,5000,7001,9000,9200}"
 
-  # httpx för subdomäner
-  "$TIMEOUT_BIN" "$T_HTTPX" "$HTTPX_BIN" -l "$OUT/subdomains.txt" -ports "$PORTS" \
-    -title -tech-detect -status-code -follow-redirects -no-color -json -o "$OUT/httpx_domains.json" -rl "$HTTPX_RL" -c "$HTTPX_C" || true
+  HTTPX_BASE_OPTS=(-title -tech-detect -status-code -follow-redirects -no-color -json -rl "$HTTPX_RL")
+  [[ "$HTTPX_SUPPORTS_C" == "yes" ]] && HTTPX_BASE_OPTS+=(-c "$HTTPX_C")
 
-  # httpx för ip:port
+  "$TIMEOUT_BIN" "$T_HTTPX" "$HTTPX_BIN" -l "$OUT/subdomains.txt" -ports "$PORTS" \
+    "${HTTPX_BASE_OPTS[@]}" -o "$OUT/httpx_domains.json" || true
+
   if [[ -s "$OUT/urls_from_ports.txt" ]]; then
     "$TIMEOUT_BIN" "$T_HTTPX" "$HTTPX_BIN" -l "$OUT/urls_from_ports.txt" \
-      -title -tech-detect -status-code -follow-redirects -no-color -json -o "$OUT/httpx_ports.json" -rl "$HTTPX_RL" -c "$HTTPX_C" || true
+      "${HTTPX_BASE_OPTS[@]}" -o "$OUT/httpx_ports.json" || true
   fi
 
-  # httpx för seed-hosts
   if [[ -s "$OUT/seed_urls.txt" ]]; then
     "$TIMEOUT_BIN" "$T_HTTPX" "$HTTPX_BIN" -l "$OUT/seed_urls.txt" \
-      -title -tech-detect -status-code -follow-redirects -no-color -json -o "$OUT/httpx_seeds.json" -rl "$HTTPX_RL" -c "$HTTPX_C" || true
+      "${HTTPX_BASE_OPTS[@]}" -o "$OUT/httpx_seeds.json" || true
   fi
 
-  # sammanfoga
   cat "$OUT"/httpx_*.json 2>/dev/null > "$OUT/httpx_all.json" || true
   jq -r '.url' "$OUT/httpx_all.json" 2>/dev/null | scope_filter | sort -u > "$OUT/http_services.txt" || : > "$OUT/http_services.txt"
   log_info "HTTP endpoints: $(wc -l < "$OUT/http_services.txt" 2>/dev/null || echo 0)"
@@ -352,7 +386,7 @@ step9_katana() {
   fi
 }
 
-# ---------- Steg 10: Historiska endpoints ----------
+# ---------- Steg 10: Historik (gau/waybackurls) ----------
 step10_history() {
   [[ "$SKIP_HISTORY" == "1" ]] && { log_info "Skip History (SKIP_HISTORY=1)"; : > "$OUT/historical_endpoints.txt"; return 0; }
   : > "$OUT/historical_endpoints.txt"; : > "$OUT/historical_endpoints.gau.txt"; : > "$OUT/historical_endpoints.wbu.txt"
