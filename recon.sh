@@ -3,6 +3,17 @@
 set -Eeuo pipefail
 shopt -s lastpipe
 
+# Läs in lokal .env om den finns.
+# Detta gör att du kan lägga API-nycklar och lokala overrides i en fil
+# utan att behöva sätta dem manuellt i varje shell-session.
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -f "$SCRIPT_DIR/.env" ]]; then
+  # shellcheck disable=SC1091
+  set -a
+  source "$SCRIPT_DIR/.env"
+  set +a
+fi
+
 # ---------- Logging ----------
 tslog()    { printf '[%(%Y-%m-%d %H:%M:%S)T] %s\n' -1 "$*"; }
 log_info() { tslog "[i] $*"; }
